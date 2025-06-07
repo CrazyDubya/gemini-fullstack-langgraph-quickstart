@@ -17,7 +17,10 @@ dependencies = [
     "langgraph-cli",
     "langgraph-api",
     "fastapi",
+    "python-multipart", # For FastAPI UploadFile
     "google-genai",
+    "pypdf2>=3.0.0", # Added for PDF processing
+    "arxiv>=2.1.0", # For ArXiv search
 ]
 
 

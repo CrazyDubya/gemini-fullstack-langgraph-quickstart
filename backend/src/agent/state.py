@@ -5,7 +5,7 @@ from typing import TypedDict
 
 from langgraph.graph import add_messages
 from typing_extensions import Annotated
-
+from typing import Optional, List, Dict
 
 import operator
 from dataclasses import dataclass, field
@@ -21,6 +21,15 @@ class OverallState(TypedDict):
     max_research_loops: int
     research_loop_count: int
     reasoning_model: str
+    uploaded_pdf_info: Optional[List[Dict[str, str]]] = None # [{"name": "filename.pdf", "path": "/path/to/file.pdf"}]
+    pdf_research_result: Annotated[Optional[list], operator.add] = None
+    # For Codebase Q&A task
+    codebase_context: Optional[str] = None
+    task_type: Optional[str] = None # e.g., "research", "codebase_qa", "url_summary"
+    # For URL Summarization task
+    target_url: Optional[str] = None
+    # For ArXiv Search
+    arxiv_research_result: Annotated[Optional[list], operator.add] = None
 
 
 class ReflectionState(TypedDict):
@@ -37,7 +46,11 @@ class Query(TypedDict):
 
 
 class QueryGenerationState(TypedDict):
-    query_list: list[Query]
+    query_list: list[Query] # This is output of query_writer, List[Dict[str,str]]
+    # query_list from generate_query node is List[str], so we might need a different name
+    # or ensure generate_query output matches this if QueryGenerationState is used as a direct state key.
+    # For now, generate_query populates 'query_list' in OverallState as List[str].
+    # Let's keep QueryGenerationState for the node's direct output type hint.
 
 
 class WebSearchState(TypedDict):

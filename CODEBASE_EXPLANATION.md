@@ -2,7 +2,13 @@
 
 ## Project Overview and Purpose
 
-This project is a fullstack application that uses a React frontend and a LangGraph-powered backend agent. The agent is designed to perform comprehensive research on a user's query. It dynamically generates search terms, queries the web using Google Search, reflects on the results to identify knowledge gaps, and iteratively refines its search until it can provide a well-supported answer with citations. This application serves as an example of building research-augmented conversational AI using LangGraph and Google's Gemini models.
+This project is a fullstack application featuring a React frontend and a versatile LangGraph-powered backend agent. The agent is capable of performing multiple tasks:
+
+1.  **Comprehensive Research**: Dynamically generates search terms, queries the web using Google Search and ArXiv for academic papers, processes uploaded PDF documents, reflects on results to identify knowledge gaps, and iteratively refines its search to provide well-supported answers with citations.
+2.  **Codebase Question Answering**: Answers questions based *only* on the content of a provided document (specifically, this `CODEBASE_EXPLANATION.md` itself), without performing external searches.
+3.  **URL Summarization**: Fetches content from a user-provided URL and generates a concise summary.
+
+The application demonstrates building advanced, multi-functional conversational AI using LangGraph, Google's Gemini models, and various tools. The frontend supports user interactions, including (mocked) user accounts for chat history persistence and PDF file uploads.
 
 ## Technologies Used
 
@@ -14,135 +20,129 @@ This project is a fullstack application that uses a React frontend and a LangGra
     -   [LangGraph](https://github.com/langchain-ai/langgraph)
     -   [FastAPI](https://fastapi.tiangolo.com/)
     -   [Google Gemini](https://ai.google.dev/models/gemini) LLM
+    -   [PyPDF2](https://pypi.org/project/PyPDF2/) (for PDF text extraction)
+    -   [arxiv](https://pypi.org/project/arxiv/) (Python wrapper for ArXiv API)
+    -   `python-multipart` (for FastAPI file uploads)
 
 ## Project Structure
 
 The project is divided into two main directories:
 
 -   `frontend/`: Contains the React application.
--   `backend/`: Contains the LangGraph/FastAPI application, including the research agent logic.
+-   `backend/`: Contains the LangGraph/FastAPI application, including the agent logic and API endpoints. The agent's graph definition is in `backend/src/agent/graph.py`.
 
 ## Backend Agent Workflow (`backend/src/agent/graph.py`)
 
-The backend agent is built using LangGraph and follows a stateful graph-based approach to process user queries.
+The backend agent is built using LangGraph and follows a stateful, graph-based approach. It can perform different tasks based on an initial `task_type` parameter.
 
-**States:**
+**Core Agent States (in `backend/src/agent/state.py`)**:
 
-The agent transitions through several states defined in `agent/state.py`:
+-   `OverallState`: The central state dictionary holding all information, including:
+    -   `messages`: The history of conversation.
+    -   `task_type`: Specifies the current task (e.g., "research", "codebase_qa", "url_summary").
+    -   Research-specific fields: `query_list`, `web_research_result`, `pdf_research_result`, `arxiv_research_result`, `sources_gathered`, `uploaded_pdf_info`, etc.
+    -   Codebase Q&A specific field: `codebase_context`.
+    -   URL Summarization specific field: `target_url`.
+-   `ReflectionState`: Holds outputs from the reflection step during research.
 
--   `OverallState`: Represents the overall state of the agent, including messages, query lists, research results, and loop counts.
--   `QueryGenerationState`: State related to generating search queries.
--   `ReflectionState`: State related to reflecting on search results and identifying knowledge gaps.
--   `WebSearchState`: State related to performing web searches.
+**Task Routing (`task_router_node`)**:
 
-**Core Nodes and Logic:**
+-   The graph execution begins with `task_router_node`.
+-   This node inspects `state.get("task_type")`:
+    -   If "codebase_qa" (and `codebase_context` is present), it routes to `codebase_qa_answer_node`.
+    -   If "url_summary" (and `target_url` is present), it routes to `url_summary_node`.
+    -   Otherwise (or if required context for a special task is missing), it defaults to the "research" flow by routing to `generate_query`.
 
-1.  **`generate_query` (Node):**
-    -   Takes the user's question from the `OverallState`.
-    -   Uses a Gemini model (`configurable.query_generator_model`) to generate a list of initial search queries.
-    -   The number of initial queries can be configured (`initial_search_query_count`).
-    -   Outputs a `QueryGenerationState` with the `query_list`.
+**1. Research Task Flow**:
 
-2.  **`continue_to_web_research` (Node):**
-    -   Receives the `query_list` from `generate_query`.
-    -   Spawns multiple `web_research` tasks, one for each search query, by sending messages to the `web_research` node.
+This is the most complex flow, designed for in-depth information gathering.
 
-3.  **`web_research` (Node):**
-    -   Receives a `search_query` and an `id`.
-    -   Uses the `genai_client` (Google Search API) and a Gemini model (`configurable.query_generator_model`) to perform a web search for the given query.
-    -   Resolves URLs found in the search results to shorter versions.
-    -   Extracts citations and inserts citation markers into the search result text.
-    -   Outputs an `OverallState` update with `sources_gathered`, the original `search_query`, and the `web_research_result` (text with citations).
+-   **`generate_query` (Node)**:
+    -   Generates initial search queries based on the user's question using an LLM.
+-   **`pdf_research_node` (Node)**:
+    -   If `uploaded_pdf_info` (containing name and server path of an uploaded PDF) is present in the state, this node uses the `PDFTextExtractionTool` (which uses `PyPDF2`) to extract text from the specified PDF(s).
+    -   The extracted text is added to `state['pdf_research_result']`. This content is then available for reflection and final answer generation.
+-   **`initial_web_research_dispatcher_node` (Node)**:
+    -   Takes the `query_list` from `generate_query`.
+    -   Dispatches individual search tasks to the `web_research` worker node for each query using LangGraph's `Send` mechanism.
+-   **`web_research` (Worker Node)**:
+    -   Receives a single search query.
+    -   Uses a Gemini model with the Google Search API tool (`genai_client.models.generate_content`) to find relevant web pages.
+    -   Extracts content and citation information, storing results in `web_research_result` and `sources_gathered`.
+-   **`arxiv_research_node` (Worker Node - for follow-ups)**:
+    -   Receives a search query intended for ArXiv.
+    -   Uses the `ArxivSearchTool` (which uses the `arxiv` library) to find academic papers.
+    -   Formats results (title, summary, authors, PDF link) into a text string.
+    -   Appends this string to `state['arxiv_research_result']`.
+-   **`reflection_node` (Node)**:
+    -   Consolidates all gathered information: `web_research_result`, `pdf_research_result`, and `arxiv_research_result`.
+    -   Uses an LLM with `reflection_instructions` prompt to analyze the information.
+    -   Determines if the information is sufficient (`is_sufficient`).
+    *   Identifies knowledge gaps (`knowledge_gap`).
+    *   Suggests `follow_up_queries`. Each follow-up query is now a dictionary specifying its `type` (e.g., "web", "arxiv") and the `query` string. This allows the agent to decide which search tool to use for follow-ups.
+-   **`evaluate_research_conditional_router` (Conditional Edge Logic)**:
+    -   If `is_sufficient` is true or max research loops are reached, routes to `finalize_answer_node`.
+    -   Else, if `follow_up_queries` exist, routes to `followup_research_dispatcher_node`.
+-   **`followup_research_dispatcher_node` (Node)**:
+    -   Iterates through the `follow_up_queries` from the reflection step.
+    -   If a query `type` is "arxiv", it dispatches a task to `arxiv_research_node`.
+    -   Otherwise (defaulting to "web"), it dispatches to `web_research_node`.
+-   **Looping**: After tasks from `followup_research_dispatcher_node` are processed (i.e., `web_research` or `arxiv_research_node` complete), the graph routes back to `reflection_node` to evaluate the newly gathered information.
+-   **`finalize_answer_node` (Node)**:
+    -   Consolidates all research results one last time (web, PDF, ArXiv).
+    -   Uses an LLM with `answer_instructions` prompt to synthesize a final, comprehensive answer, including web citations.
+    -   The final answer is stored as an `AIMessage`.
 
-4.  **`reflection` (Node):**
-    -   Receives the accumulated `web_research_result` from previous steps.
-    -   Increments the `research_loop_count`.
-    -   Uses a Gemini model (`configurable.reasoning_model`) to analyze the gathered summaries.
-    -   Determines if the information is `is_sufficient` to answer the user's topic.
-    -   Identifies any `knowledge_gap`.
-    -   Generates `follow_up_queries` if more information is needed.
-    -   Outputs a `ReflectionState` with these findings.
+**2. Codebase Question Answering Task Flow (`codebase_qa_answer_node`)**:
 
-5.  **`evaluate_research` (Conditional Edge):**
-    -   Receives the `ReflectionState`.
-    -   Checks if `is_sufficient` is true OR if the `research_loop_count` has reached the `max_research_loops` (configurable).
-    -   If true, routes to `finalize_answer`.
-    -   Otherwise, routes back to `web_research` with the `follow_up_queries`. Each follow-up query is sent as a new task to the `web_research` node.
+-   This flow is invoked if `task_type` is "codebase_qa".
+-   It uses the `codebase_qa_prompt`.
+-   The primary input is `state['codebase_context']`, which is intended to be populated with the content of this `CODEBASE_EXPLANATION.md` document by the calling application (e.g., `app.py`).
+-   The LLM answers the user's question based *solely* on this provided context, without any external searches or tool usage.
+-   The answer is stored as an `AIMessage`. This node connects directly to `END`.
 
-6.  **`finalize_answer` (Node):**
-    -   Receives the final set of `web_research_result` and `sources_gathered`.
-    -   Uses a Gemini model (`configurable.reasoning_model`) to synthesize a coherent answer based on the research topic and summaries.
-    -   Replaces short URLs in the generated answer with their original, full URLs.
-    -   Filters `sources_gathered` to include only those actually cited in the final answer.
-    -   Outputs an `OverallState` with the final `AIMessage` (the answer) and the `sources_gathered`.
+**3. URL Summarization Task Flow (`url_summary_node`)**:
 
-**Graph Compilation:**
+-   Invoked if `task_type` is "url_summary".
+-   Uses the `url_summarizer_prompt`.
+-   Takes `state['target_url']` (a user-provided URL).
+-   It invokes an LLM, similar to `web_research`, enabling the `google_search` tool. The prompt specifically instructs the LLM to use its browsing capability to fetch content from the `target_url` and summarize it.
+-   The generated summary is stored as an `AIMessage`. This node connects directly to `END`.
 
--   The nodes and edges are compiled into a `StateGraph` named "pro-search-agent".
--   The process starts at `generate_query`.
--   The graph can loop between `web_research` and `reflection` until the research is deemed sufficient or the maximum loop count is reached.
--   The process ends at `finalize_answer`.
+**Graph Compilation**:
+The graph is compiled with the name "configurable-agent".
 
-## Frontend Components and Data Flow (`frontend/src/App.tsx`)
+## Frontend Components and Data Flow (`frontend/src/App.tsx`, etc.)
 
-The frontend is a React application that interacts with the backend agent.
+The React frontend allows users to interact with the various agent capabilities.
 
-**Main Component: `App.tsx`**
+**Key Frontend Features & Flow**:
 
--   **State Management:**
-    -   `processedEventsTimeline`: Stores an array of `ProcessedEvent` objects, representing the activities of the backend agent (e.g., generating queries, web research, reflection).
-    -   `historicalActivities`: Stores a record of `processedEventsTimeline` for each completed AI message, allowing users to see the research steps for past answers.
-    -   `scrollAreaRef`: Used to auto-scroll the chat view.
-    -   `hasFinalizeEventOccurredRef`: Tracks if the `finalize_answer` event has occurred to correctly associate activities with the final AI message.
+-   **User Authentication (Mocked)**:
+    -   `App.tsx` manages a `currentUser` state.
+    -   If no user is logged in, a simple form prompts for a username.
+    -   Upon submission, the username is stored in `localStorage`. There's no backend password authentication.
+    -   A "Logout" button clears the user from `localStorage` and resets the session.
+-   **Chat History**:
+    -   Chat messages (`Message[]`) are stored in `localStorage`, keyed by the username (`chatHistory_[username]`).
+    -   When a user logs in, their past chat history is loaded into the `chatMessages` state in `App.tsx`.
+    -   The `useStream` hook (from `@langchain/langgraph-sdk/react`) is initialized with this loaded history using `thread.replace()`.
+    -   As new messages are streamed from the backend or sent by the user, the combined history in `chatMessages` is updated and re-saved to `localStorage`.
+    -   `handleSubmit` in `App.tsx` sends the complete message history (loaded + new) to the backend agent.
+-   **PDF Upload**:
+    -   `InputForm.tsx` includes a file input (`<input type="file" accept=".pdf" />`) triggered by a paperclip icon.
+    -   When a file is selected, `App.tsx`'s `handleSubmit` function is informed.
+    -   `handleSubmit` first uploads the selected PDF to a backend endpoint (`/upload_pdf/`) using `fetch` and `FormData`.
+    -   The backend saves the PDF to a temporary server directory (e.g., `temp_pdfs/`) and returns its name and server path.
+    -   `App.tsx` stores this PDF information (name and path) in `uploadedPdfInfo` state.
+    -   This `uploadedPdfInfo` is then included in the payload to the agent (`thread.submit()`) when the user sends their query, allowing the `pdf_research_node` in the backend to access it.
+    -   The `uploadedPdfInfo` is cleared after the submission to prevent re-processing with unrelated queries.
+    -   The name of an uploaded/selected file is displayed in the UI near the input area.
+-   **Interaction with Agent Tasks**:
+    -   The frontend doesn't explicitly set `task_type`. This is currently a backend configuration or would need UI elements to select a task type, which then `app.py` would use to initialize the agent state. For now, the "research" task is the default if no other task is specified by the backend setup. To use Codebase Q&A or URL Summarization, the initial call to the agent graph from `app.py` would need to set `task_type` and the relevant context (`codebase_context` or `target_url`).
 
--   **`useStream` Hook:**
-    -   Manages the communication with the backend LangGraph agent via the `@langchain/langgraph-sdk/react` library.
-    -   `apiUrl`: Configured based on development (`http://localhost:2024`) or production (`http://localhost:8123`) environment.
-    -   `assistantId`: Set to "agent".
-    -   `messagesKey`: Specifies that the "messages" field in the stream contains the chat messages.
-    -   `onFinish`: Callback for when the stream finishes.
-    -   `onUpdateEvent`: Callback for processing events from the backend agent. This is where `processedEventsTimeline` is populated based on events like `generate_query`, `web_research`, `reflection`, and `finalize_answer`.
-
--   **Event Processing (`onUpdateEvent`):**
-    -   Transforms backend events into user-friendly `ProcessedEvent` objects with a `title` and `data` description.
-    -   For `generate_query`: Shows "Generating Search Queries" and the list of queries.
-    -   For `web_research`: Shows "Web Research", the number of sources gathered, and example labels.
-    -   For `reflection`: Shows "Reflection" and whether the search was successful or if more information is needed (including follow-up queries).
-    -   For `finalize_answer`: Shows "Finalizing Answer". Sets `hasFinalizeEventOccurredRef.current` to true.
-
--   **Effect Hooks (`useEffect`):**
-    -   Auto-scrolls the chat area when new messages arrive.
-    -   When a `finalize_answer` event has occurred and the stream is no longer loading, it associates the current `processedEventsTimeline` with the last AI message ID in `historicalActivities`. This allows the UI to display the specific research steps taken for that particular answer.
-
--   **`handleSubmit` Function:**
-    -   Called when the user submits a new message.
-    -   Clears the `processedEventsTimeline` and resets `hasFinalizeEventOccurredRef`.
-    -   Converts a user-selected "effort" level (low, medium, high) into `initial_search_query_count` and `max_research_loops` for the backend.
-    -   Appends the new human message to the existing messages.
-    -   Calls `thread.submit()` to send the updated messages and configuration parameters to the backend agent.
-
--   **`handleCancel` Function:**
-    -   Calls `thread.stop()` to interrupt the backend agent.
-    -   Reloads the page.
-
--   **Rendering Logic:**
-    -   If there are no messages, it displays the `WelcomeScreen` component, which allows the user to input their first query, select effort level, and model.
-    -   If there are messages, it displays the `ChatMessagesView` component, which shows the conversation history, the live activity timeline for the current query, and allows access to historical activities for previous AI responses.
-
-**Components:**
-
--   **`WelcomeScreen`:** The initial screen for users to start a conversation.
--   **`ChatMessagesView`:** Displays the chat messages, current agent activity, and provides input for new messages.
--   **`ActivityTimeline` (`ProcessedEvent` type):** Likely a component (not fully detailed in `App.tsx` but implied by `ProcessedEvent`) to display the sequence of agent actions.
-
-**Data Flow Summary:**
-
-1.  User submits a query, effort level, and model choice through `WelcomeScreen` or `ChatMessagesView`.
-2.  `handleSubmit` in `App.tsx` sends this information to the backend agent via `thread.submit()`.
-3.  The backend agent streams events (`generate_query`, `web_research`, etc.) back to the frontend.
-4.  `onUpdateEvent` in `App.tsx` processes these events and updates `processedEventsTimeline`.
-5.  The `ChatMessagesView` displays the messages from `thread.messages` and the `liveActivityEvents` (current timeline).
-6.  When the agent finishes (`finalize_answer` event and `isLoading` is false), the `processedEventsTimeline` is saved to `historicalActivities` associated with the AI's response ID.
+**Backend API Endpoint for PDF Upload**:
+-   A new POST endpoint `/upload_pdf/` in `backend/src/agent/app.py` handles PDF file uploads from the frontend.
 
 ## Setup and Development Instructions (Summarized from README.md)
 
@@ -181,37 +181,17 @@ The frontend is a React application that interacts with the backend agent.
     -   **Backend (`backend/` directory):** `langgraph dev`
     -   **Frontend (`frontend/` directory):** `npm run dev`
 
-The backend server (when run with `langgraph dev`) also provides a LangGraph UI.
 The `apiUrl` in `frontend/src/App.tsx` is set to `http://localhost:2024` for development and `http://localhost:8123` for the Docker Compose production setup.
 
 ## Leveraging the Codebase
 
-This codebase provides a solid foundation for building advanced research and conversational AI applications. Here are some potential use cases, extensions, and improvements:
+This enhanced codebase offers a robust platform for various AI-driven information processing tasks. Potential extensions and use cases include:
 
--   **Integrate New Data Sources or Tools:**
-    -   Modify the `web_research` node or add new nodes to incorporate information from various sources like PDF documents, CSV files, or proprietary databases.
-    -   Integrate specialized APIs (e.g., financial data APIs, scientific databases) to provide the agent with access to structured information.
-    -   Add tools for document parsing (e.g., PDF readers) and data extraction.
-
--   **Customize Agent Behavior for Specific Tasks:**
-    -   Tailor the prompts in `backend/src/agent/prompts.py` to specialize the agent for specific domains like legal research, medical information gathering (with appropriate disclaimers and safeguards), or technical troubleshooting.
-    -   Adjust the `Reflection` logic to better suit the requirements of different tasks, for example, by changing how `is_sufficient` is determined or what constitutes a `knowledge_gap`.
-    -   Develop new nodes or modify existing ones to perform task-specific actions (e.g., summarizing legal documents, cross-referencing medical symptoms).
-
--   **Enhance Frontend Features:**
-    -   Implement user accounts to save chat history and preferences.
-    -   Add functionality to export or share research results.
-    -   Improve the visualization of sources and citations.
-    -   Allow users to provide feedback on the agent's responses to help refine its performance.
-    -   Develop more sophisticated ways to manage and view `historicalActivities`.
-
--   **Use Agent as a Backend for Other Applications:**
-    -   Expose the agent's capabilities through a more robust API that can be consumed by other applications, such as custom chatbots, voice assistants, or automated reporting tools.
-    -   Integrate the agent into existing workflows to provide research and information retrieval support.
-
--   **Improve Agent's Reasoning Capabilities:**
-    -   Experiment with different Large Language Models (LLMs) available through LangChain and Google Generative AI for various nodes (query generation, reflection, answer synthesis) to find the best fit for specific needs.
-    -   Explore fine-tuning models on domain-specific datasets to improve the agent's understanding and performance on specialized topics.
-    -   Implement more advanced reflection mechanisms, such as multi-step reasoning or self-correction loops.
-    -   Enhance the `evaluate_research` logic to make more nuanced decisions about when to continue research or finalize an answer.
-    -   Allow the agent to ask clarifying questions to the user if the initial query is ambiguous.
+-   **Expanding Toolset**: Integrate more tools into the research flow (e.g., specific database readers, other APIs like Wikipedia, financial data services). The reflection mechanism can be taught to suggest these tools.
+-   **Task-Specific UI**: Develop UI components in the frontend to explicitly select the desired `task_type` (Research, Codebase Q&A, URL Summary) and provide the necessary inputs (e.g., a field for `target_url`).
+-   **Advanced PDF Interaction**: Instead of just text extraction, allow for Q&A over uploaded PDFs, or use the ArXiv PDF links for direct Q&A with those papers.
+-   **Refined Citation for ArXiv**: Extract more structured metadata from ArXiv results and display it more formally in the final answer, potentially linking directly to the ArXiv page or PDF.
+-   **Error Handling and UX**: Improve frontend error handling for API calls (PDF upload, agent interaction) and provide clearer user feedback.
+-   **Production Deployment**: For real-world use, implement proper user authentication, secure file management (with cleanup), and robust API security for the backend.
+-   **Fine-tuning Models**: For highly specialized Q&A or summarization tasks, fine-tune LLMs on domain-specific datasets.
+-   **Interactive Task Configuration**: Allow users to configure agent parameters (e.g., number of search results, summarization length) through the UI.
